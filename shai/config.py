@@ -48,7 +48,6 @@ explain = false
 
 [ui]
 spinner = true
-submenu_cols = 3
 
 [context]
 history_lines = 30

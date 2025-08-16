@@ -5,6 +5,7 @@ from typing import List
 
 from .config import load_settings
 from .ui.table import ColSpec, grid_select
+from .pm.install_ui import offer_installs_for_missing
 from .app.flow import (
     fetch_suggestions, gather_context, build_rows, make_style_functions,
     prepend_sorted, is_installer_command, run_and_capture, refresh_requires, rank_only
@@ -42,7 +43,16 @@ def main(argv: List[str] | None = None) -> int:
 
     while True:
         rows, misslists, new_flags = build_rows(suggestions, show_explain)
-        # Wider Command, narrow Status, Explanation smaller than before
+
+        # Append SKIP row at the bottom
+        if show_explain:
+            rows.append(("[ Skip ]", "", "Exit without choosing"))
+        else:
+            rows.append(("[ Skip ]", ""))
+        misslists.append([])  # no missing tools for skip
+        new_flags.append(False)
+
+        # Wider Command, narrow Status, small Explanation
         if show_explain:
             colspecs = [
                 ColSpec(header="Command",     min_width=56, wrap=False, ellipsis=True),
@@ -70,15 +80,22 @@ def main(argv: List[str] | None = None) -> int:
         if action in ("quit",) or row_idx is None:
             print("\x1b[2mDone.\x1b[0m"); return 0
 
+        # If the user selected the SKIP row (last row), exit cleanly
+        if row_idx == len(rows) - 1:
+            print("\x1b[2mSkipped.\x1b[0m")
+            return 0
+
         chosen = suggestions[row_idx]
         missing = misslists[row_idx]
 
         # Execute / Exec → Continue
         if action == "submenu-selected" and sub_idx in (0, 2):
             if missing:
-                print("\nMissing tools:\n  " + "\n  ".join(missing))
-                print("\x1b[2m(Installer UI not wired yet.)\x1b[0m")
-                input("\x1b[2mPress Enter to return…\x1b[0m")
+                # Open installer UI; if anything was installed, refresh requires and go back to menu
+                installed_any = offer_installs_for_missing(missing, cfg.pm_order, cfg.n_suggestions)
+                if installed_any:
+                    refresh_requires(chosen)
+                # either way, back to suggestions table
                 continue
 
             if sub_idx == 0:
@@ -101,7 +118,6 @@ def main(argv: List[str] | None = None) -> int:
                 follow = input("\nWhat do you want to do next? ").strip()
             except KeyboardInterrupt:
                 follow = ""
-
             ctx = gather_context(cfg,
                                  recent_output=out,
                                  previous_query=query,
@@ -109,7 +125,7 @@ def main(argv: List[str] | None = None) -> int:
                                  followup=follow)
             new_page = fetch_suggestions(model, query, len(suggestions), ctx, num_ctx, spinner=True)
             new_page = rank_only(new_page)
-            # Replace (old ones removed), but mark as NEW so they’re bolded
+            # Replace (old ones removed), mark as NEW so they’re bolded
             for s in new_page: setattr(s, "_is_new", True)
             suggestions = new_page
             continue
@@ -128,7 +144,7 @@ def main(argv: List[str] | None = None) -> int:
             input("\x1b[2m\nPress Enter to return…\x1b[0m")
             continue
 
-        # Comment → show command & explanation, accept note, PREPEND N new items
+        # Comment → show command & explanation, accept note, PREPEND N new items (sorted)
         if action == "submenu-selected" and sub_idx == 1:
             print("\n\x1b[1mCommand:\x1b[0m " + chosen.command)
             if getattr(chosen, "explanation_min", ""):
@@ -149,7 +165,7 @@ def main(argv: List[str] | None = None) -> int:
         # fallback
         if action == "row-selected":
             print("\x1b[1mRunning:\x1b[0m " + chosen.command + "\n")
-            from .app.flow import run_and_capture as _run; rc,_ = _run(chosen.command)
+            rc, _ = run_and_capture(chosen.command)
             return rc
 
 if __name__ == "__main__":
