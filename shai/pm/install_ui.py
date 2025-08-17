@@ -7,26 +7,18 @@ from ..context.packages import available_pms, search_best_provider, install_comm
 from ..ui.table import ColSpec, grid_select
 
 def _run_stream(cmd: str) -> int:
-    proc = subprocess.Popen(
-        cmd, shell=True,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1, universal_newlines=True
-    )
+    """Run install command interactively, streaming output and allowing user input."""
     try:
-        for line in proc.stdout:
-            print(line, end="")
+        return subprocess.call(cmd, shell=True)
     except KeyboardInterrupt:
-        proc.terminate()
-        proc.wait()
-        return proc.returncode
-    return proc.wait()
+        return 130
 
 def offer_installs_for_missing(
     missing_bins: List[str],
     pm_order: List[str],
     max_pkgs: int = 10,
     add_ignored: Optional[Callable[[str], None]] = None,
-) -> bool:
+) -> tuple[bool, bool]:
     """
     For each missing binary, search the configured package managers in order.
     Show skipped PMs (with 'no results') before showing the first that had hits.
@@ -37,7 +29,7 @@ def offer_installs_for_missing(
     if not managers:
         print("\x1b[31mNo known package managers installed.\x1b[0m")
         input("\x1b[2mPress Enter to return…\x1b[0m")
-        return False
+        return False, installed_any
 
     for binary in missing_bins:
         tried_msgs: List[str] = []
@@ -58,14 +50,16 @@ def offer_installs_for_missing(
 
         rows: List[Tuple[str, str]] = []
         if results:
-            rows.append(("[ Skip ]", f"skip installing '{binary}' and continue"))
-            rows.append(("[ Ignore ]", f"do not prompt for '{binary}' again"))
+            rows.append(("[ Back (Esc) ]", "return to suggestions"))
+            rows.append(("[ Continue ]", f"run without installing '{binary}'"))
+            rows.append(("[ Add to exception list ]", f"ignore '{binary}' next time"))
             for pkg, desc in results[:max_pkgs]:
                 rows.append((install_command(pm_used, pkg), desc or ""))
             title = f" Search: {search_cmd}  [via {pm_used}] "
         else:
-            rows.append(("[ Skip ]", f"no results for '{binary}' → continue anyway"))
-            rows.append(("[ Ignore ]", f"do not prompt for '{binary}' again"))
+            rows.append(("[ Back (Esc) ]", "return to suggestions"))
+            rows.append(("[ Continue ]", f"run without installing '{binary}'"))
+            rows.append(("[ Add to exception list ]", f"ignore '{binary}' next time"))
             title = f" No results for: {binary} "
 
         colspecs = [
@@ -73,36 +67,27 @@ def offer_installs_for_missing(
             ColSpec("Description",     min_width=24, wrap=True),
         ]
 
-        def menu_for_row(i: int): return ["Run", "Back"]
-
-        action, r, s = grid_select(
+        action, r, _ = grid_select(
             rows, colspecs,
-            row_menu_provider=menu_for_row,
-            submenu_cols=2,
             title=title,
         )
-        if action in ("quit",) or r is None:
-            return installed_any
+        if action in ("quit",) or r is None or r == 0:
+            return False, installed_any
 
-        # Always execute suggestion if Skip chosen
-        if r == 0:
-            continue  # skip installing
-        if r == 1:
+        if r == 1:  # Continue without installing
+            return True, installed_any
+        if r == 2:  # Add to exception list
             if add_ignored:
                 add_ignored(binary)
                 print(f"\x1b[2mIgnored '{binary}' for future suggestions.\x1b[0m")
             continue
 
-        if action == "submenu-selected":
-            if s == 0:  # Run
-                chosen_cmd = rows[r][0]
-                print("\n\x1b[1mRunning:\x1b[0m " + chosen_cmd + "\n")
-                rc = _run_stream(chosen_cmd)
-                installed_any = installed_any or (rc == 0)
-                input("\x1b[2m\nPress Enter to return…\x1b[0m")
-                continue
-            if s == 1:  # Back
-                continue
+        chosen_cmd = rows[r][0]
+        print("\n\x1b[1mRunning:\x1b[0m " + chosen_cmd + "\n")
+        rc = _run_stream(chosen_cmd)
+        installed_any = installed_any or (rc == 0)
+        input("\x1b[2m\nPress Enter to return…\x1b[0m")
+        # after installation continue to next binary
 
-    return installed_any
+    return True, installed_any
 

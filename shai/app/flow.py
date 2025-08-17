@@ -63,26 +63,29 @@ def is_installer_command(cmd: str) -> bool:
     return bool(bins and bins[0] in INSTALLERS)
 
 # ───── suggestions / ranking ─────
-def fetch_suggestions(model: str, query: str, n: int, ctx: dict, num_ctx: int, system_prompt: str, spinner=True) -> List[Suggestion]:
+def fetch_suggestions(model: str, query: str, n: int, ctx: dict, num_ctx: int,
+                      system_prompt: str, spinner=True, label: str = "processing") -> List[Suggestion]:
     if spinner:
-        return with_spinner(request_suggestions, "processing", model, query, n, ctx, num_ctx, system_prompt)
+        return with_spinner(request_suggestions, label, model, query, n, ctx, num_ctx, system_prompt)
     return request_suggestions(model, query, n, ctx, num_ctx, system_prompt)
 
 def stream_suggestions(model: str, query: str, n: int, ctx: dict, num_ctx: int,
-                       system_prompt: str, callback: Callable[[Suggestion], None],
+                       system_prompt: str, callback: Callable[[Suggestion], None] | None = None,
                        spinner: bool = True) -> List[Suggestion]:
     collected: List[Suggestion] = []
     for i in range(max(0, n)):
-        batch = fetch_suggestions(model, query, 1, ctx, num_ctx, system_prompt, spinner and i == 0)
+        label = f"processing {i+1}/{n}"
+        batch = fetch_suggestions(model, query, 1, ctx, num_ctx, system_prompt,
+                                  spinner and True, label)
         if not batch:
             break
         s = batch[0]
-        setattr(s, "_is_new", True)
         collected.append(s)
-        try:
-            callback(s)
-        except Exception:
-            pass
+        if callback:
+            try:
+                callback(s)
+            except Exception:
+                pass
     return collected
 
 def annotate_requires(s: Suggestion) -> Tuple[List[str], int, int]:

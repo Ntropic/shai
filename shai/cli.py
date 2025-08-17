@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from typing import List, Any
 
-import threading
+import readline
 from .config import load_settings, add_ignored, get_ignored
 from .ui.table import ColSpec, grid_select
 from .pm.install_ui import offer_installs_for_missing
@@ -21,6 +21,26 @@ def line(text: str, width: int = 60) -> None:
     left = pad // 2
     right = pad - left
     print("-" * left + f" {text} " + "-" * right)
+
+def prompt_edit(cmd: str) -> str:
+    """Pre-fill input with command and allow user to edit before execution."""
+    def hook():
+        readline.insert_text(cmd)
+        readline.redisplay()
+    readline.set_startup_hook(hook)
+    try:
+        new = input("$ ")
+    except KeyboardInterrupt:
+        new = cmd
+    finally:
+        readline.set_startup_hook(None)
+    if not new.strip():
+        new = cmd
+    readline.add_history(new)
+    return new
+
+def shorten(cmd: str, length: int = 40) -> str:
+    return cmd if len(cmd) <= length else cmd[:length-3] + "..."
 
 def main(argv: List[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
@@ -56,28 +76,18 @@ def main(argv: List[str] | None = None) -> int:
 
     ctx = gather_context(cfg, previous_query=query)
 
-    suggestions: List[Any] = []
-    if show_explain:
-        rows: List[Any] = [("[ Skip ]", "", "Exit without choosing")]
-    else:
-        rows: List[Any] = [("[ Skip ]", "")]
-    misslists: List[List[str]] = [[]]
-    new_flags: List[bool] = [False]
+    def fetch(n: int, context: dict):
+        sugs = stream_suggestions(model, query, n, context, num_ctx, cfg.system_prompt, None, cfg.spinner)
+        rows, miss, flags = build_rows(sugs, show_explain)
+        if show_explain:
+            rows.append(("[ Back (Esc) ]", "", "return"))
+        else:
+            rows.append(("[ Back (Esc) ]", ""))
+        miss.append([]); flags.append(False)
+        return sugs, rows, miss, flags
 
-    def start_stream(n: int, context: dict):
-        def _cb(s):
-            suggestions.append(s)
-            r, m, f = build_rows([s], show_explain)
-            rows.insert(-1, r[0]); misslists.insert(-1, m[0]); new_flags.insert(-1, f[0])
-        t = threading.Thread(
-            target=stream_suggestions,
-            args=(model, query, n, context, num_ctx, cfg.system_prompt, _cb, False),
-            daemon=True,
-        )
-        t.start()
-        return t
-
-    stream_thread = start_stream(num, ctx)
+    suggestions, rows, misslists, new_flags = fetch(num, ctx)
+    header = " Suggestions "
 
     while True:
         if show_explain:
@@ -100,61 +110,58 @@ def main(argv: List[str] | None = None) -> int:
             rows, colspecs,
             row_menu_provider=menu_for_row,
             submenu_cols=cfg.submenu_cols,
-            title=" Suggestions ",
+            title=header,
             style_fn=style_cell,
             line_style_fn=style_line,
         )
-
-        if stream_thread.is_alive():
-            stream_thread.join()
 
         if action in ("quit",) or row_idx is None:
             print("\x1b[2mDone.\x1b[0m"); return 0
 
         if row_idx == len(suggestions):
-            print("\x1b[2mSkipped.\x1b[0m"); return 0
+            print("\x1b[2mDone.\x1b[0m"); return 0
 
         chosen = suggestions[row_idx]
         missing = misslists[row_idx]
 
         # Execute / Exec → Continue
         if action == "submenu-selected" and sub_idx in (0, 2):
-            missing = [b for b in missing if b not in (cfg.ignored_bins or [])]
-            if missing:
-                installed_any = offer_installs_for_missing(missing, cfg.pm_order, cfg.n_suggestions, add_ignored)
-                cfg.ignored_bins = get_ignored()
-                if installed_any:
-                    refresh_requires(chosen)
-                continue
-
-            if sub_idx == 0:
-                print("\x1b[1mRunning:\x1b[0m " + chosen.command + "\n")
-                rc, _ = run_and_capture(chosen.command)
-                if is_installer_command(chosen.command):
-                    refresh_requires(chosen)
-                    ctx = gather_context(cfg, previous_query=query)
-                    new_flags[:] = [False]*len(new_flags)
-                    stream_thread = start_stream(len(suggestions), ctx)
-                    continue
-                return rc
-
-            print("\x1b[1mRunning:\x1b[0m " + chosen.command + "\n")
-            rc, out = run_and_capture(chosen.command)
-            refresh_requires(chosen)
-            line("Next")
-            try:
-                follow = input("What do you want to do next? ").strip()
-            except KeyboardInterrupt:
-                follow = ""
-            ctx = gather_context(
-                cfg,
-                recent_output=out,
-                previous_query=query,
-                last_executed=chosen.command,
-                followup=follow,
-            )
-            new_flags[:] = [False]*len(new_flags)
-            stream_thread = start_stream(len(suggestions), ctx)
+            while True:
+                missing = [b for b in missing if b not in (cfg.ignored_bins or [])]
+                if missing:
+                    proceed, installed_any = offer_installs_for_missing(missing, cfg.pm_order, cfg.n_suggestions, add_ignored)
+                    cfg.ignored_bins = get_ignored()
+                    if not proceed:
+                        break
+                    if installed_any:
+                        refresh_requires(chosen)
+                        missing = [b for b, p in (chosen.requires or {}).items() if not p]
+                        continue
+                cmd_to_run = prompt_edit(chosen.command)
+                print(f"\n\x1b[1mRunning:\x1b[0m {cmd_to_run}\n")
+                rc, out = run_and_capture(cmd_to_run)
+                refresh_requires(chosen)
+                if sub_idx == 0:
+                    if is_installer_command(cmd_to_run):
+                        ctx = gather_context(cfg, previous_query=query)
+                        suggestions, rows, misslists, new_flags = fetch(len(suggestions), ctx)
+                        break
+                    return rc
+                line("Next")
+                try:
+                    follow = input("What do you want to do next? ").strip()
+                except KeyboardInterrupt:
+                    follow = ""
+                ctx = gather_context(
+                    cfg,
+                    recent_output=out,
+                    previous_query=query,
+                    last_executed=cmd_to_run,
+                    followup=follow,
+                )
+                suggestions, rows, misslists, new_flags = fetch(len(suggestions), ctx)
+                header = f" Suggestions (Follow up to {shorten(cmd_to_run)}) "
+                break
             continue
 
         # Explain
@@ -163,13 +170,19 @@ def main(argv: List[str] | None = None) -> int:
             print("Command: " + chosen.command)
             parts = explain_parts(model, chosen.command, num_ctx)
             if parts:
-                head, desc = parts[0]
-                print(f"- {head}: {desc}")
-                for p, d in parts[1:]:
-                    print(f"  - {p}: {d}")
+                for idx, (p, d) in enumerate(parts):
+                    if idx == 0:
+                        print(f"- {p}: {d}")
+                    else:
+                        print(f"  - {p}: {d}")
             elif getattr(chosen, "explanation_min", ""):
+                toks = chosen.command.split()
+                if toks:
+                    print(f"- {toks[0]}")
+                    for t in toks[1:]:
+                        print(f"  - {t}")
                 for p in [p.strip() for p in chosen.explanation_min.split(';') if p.strip()]:
-                    print("- " + p)
+                    print("  - " + p)
             else:
                 print("\x1b[2m(no explanation provided by the model)\x1b[0m")
             line("Tools")
@@ -195,8 +208,8 @@ def main(argv: List[str] | None = None) -> int:
                 last_suggested=chosen.command,
                 followup=note,
             )
-            new_flags[:] = [False]*len(new_flags)
-            stream_thread = start_stream(len(suggestions), ctx)
+            suggestions, rows, misslists, new_flags = fetch(len(suggestions), ctx)
+            header = f" Suggestions (Modified from {shorten(chosen.command)}) "
             continue
 
         # Variations
@@ -207,14 +220,27 @@ def main(argv: List[str] | None = None) -> int:
                 last_suggested=chosen.command,
                 followup="variants",
             )
-            new_flags[:] = [False]*len(new_flags)
-            stream_thread = start_stream(len(suggestions), ctx)
+            suggestions, rows, misslists, new_flags = fetch(len(suggestions), ctx)
+            header = f" Suggestions (Modified from {shorten(chosen.command)}) "
             continue
 
         if action == "row-selected":
-            print("\x1b[1mRunning:\x1b[0m " + chosen.command + "\n")
-            rc, _ = run_and_capture(chosen.command)
-            return rc
+            while True:
+                missing = [b for b in missing if b not in (cfg.ignored_bins or [])]
+                if missing:
+                    proceed, installed_any = offer_installs_for_missing(missing, cfg.pm_order, cfg.n_suggestions, add_ignored)
+                    cfg.ignored_bins = get_ignored()
+                    if not proceed:
+                        break
+                    if installed_any:
+                        refresh_requires(chosen)
+                        missing = [b for b, p in (chosen.requires or {}).items() if not p]
+                        continue
+                cmd_to_run = prompt_edit(chosen.command)
+                print(f"\n\x1b[1mRunning:\x1b[0m {cmd_to_run}\n")
+                rc, _ = run_and_capture(cmd_to_run)
+                refresh_requires(chosen)
+                return rc
 
 if __name__ == "__main__":
     raise SystemExit(main())
