@@ -1,6 +1,7 @@
 # shai/app/flow.py
 from __future__ import annotations
 import os, platform, shutil, subprocess, sys, threading, time
+from pathlib import Path
 from typing import List, Tuple, Dict, Any, Callable
 
 from ..llm.suggest import request_suggestions, Suggestion
@@ -42,6 +43,18 @@ def gather_context(cfg,
                    last_suggested: str = "",
                    followup: str = "") -> Dict[str, Any]:
     """Everything here becomes JSON for the model."""
+    home = Path.home()
+    config_dir = home / ".config"
+    try:
+        config_folders = sorted([p.name for p in config_dir.iterdir() if p.is_dir()])
+    except Exception:
+        config_folders = []
+    cwd = os.getcwd()
+    try:
+        entries = sorted(os.listdir(cwd))
+        cwd_contents = entries if len(entries) <= cfg.cwd_items_max else []
+    except Exception:
+        cwd_contents = []
     ctx = {
         "os": platform.system(),
         "shell": os.environ.get("SHELL"),
@@ -60,6 +73,9 @@ def gather_context(cfg,
         "last_suggested": last_suggested,
         "recent_output": (recent_output or "")[-4000:],
         "user_followup": followup,
+        "config_folders": config_folders,
+        "cwd": cwd,
+        "cwd_contents": cwd_contents,
     }
     ctx["package_managers"] = [pm for pm in cfg.pm_order if shutil.which(pm)]
     return ctx

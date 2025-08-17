@@ -62,13 +62,17 @@ def append_shell_history(cmd: str) -> None:
 def center_input(prompt: str) -> str:
     os.system("clear")
     rows, cols = shutil.get_terminal_size((80,20))
-    print("\n" * max(0, rows//2 -1), end="")
+    print("\n" * max(0, rows//2 -1), end="", flush=True)
     print(prompt.center(cols))
     pad = cols // 2
     try:
         return input(" " * pad)
     except KeyboardInterrupt:
         return ""
+
+def ask_followup() -> str:
+    """Centered prompt for follow-up commands."""
+    return center_input("What do you want to do next?").strip()
 
 DANGEROUS_CMDS = {"rm", "dd", "mkfs", "shutdown", "reboot"}
 
@@ -190,7 +194,7 @@ def main(argv: List[str] | None = None) -> int:
                         header = line("Suggestions")
                         break
                     return rc
-                follow = center_input("What do you want to do next?").strip()
+                follow = ask_followup()
                 ctx = gather_context(
                     cfg,
                     recent_output=out,

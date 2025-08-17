@@ -65,6 +65,7 @@ spinner = true
 [context]
 history_lines = 30
 use_stdin = true
+cwd_items_max = 40
 
 [pm]
 order = "pacman,apt,dnf,zypper,brew,flatpak,snap,yay,paru"
@@ -83,6 +84,7 @@ class Settings:
     submenu_cols: int = 3
     history_lines: int = 30
     use_stdin: bool = True
+    cwd_items_max: int = 40
     pm_order: list[str] | None = None
     system_prompt: str = DEFAULT_PROMPT
     ignored_bins: list[str] | None = None
@@ -155,6 +157,8 @@ def load_settings() -> Settings:
     try: s.history_lines = int(cx.get("history_lines", s.history_lines))
     except Exception: pass
     s.use_stdin = bool(cx.get("use_stdin", s.use_stdin))
+    try: s.cwd_items_max = int(cx.get("cwd_items_max", s.cwd_items_max))
+    except Exception: pass
 
     pm = d.get("pm", {})
     order = pm.get("order", "")
