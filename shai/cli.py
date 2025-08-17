@@ -32,6 +32,7 @@ def line(text: str) -> str:
 
 def prompt_edit(cmd: str) -> str:
     """Pre-fill input with command and allow user to edit before execution."""
+    os.system("clear")
     def hook():
         readline.insert_text(cmd)
         readline.redisplay()
@@ -62,8 +63,10 @@ def center_input(prompt: str) -> str:
     os.system("clear")
     rows, cols = shutil.get_terminal_size((80,20))
     print("\n" * max(0, rows//2 -1), end="")
+    print(prompt.center(cols))
+    pad = cols // 2
     try:
-        return input(prompt.center(cols))
+        return input(" " * pad)
     except KeyboardInterrupt:
         return ""
 
@@ -116,7 +119,7 @@ def main(argv: List[str] | None = None) -> int:
 
     query = " ".join(args.query).strip()
     if not query:
-        query = center_input("What do you want to do? ").strip()
+        query = center_input("What do you want to do?").strip()
         if not query:
             return 1
 
@@ -187,7 +190,7 @@ def main(argv: List[str] | None = None) -> int:
                         header = line("Suggestions")
                         break
                     return rc
-                follow = center_input("What do you want to do next? ").strip()
+                follow = center_input("What do you want to do next?").strip()
                 ctx = gather_context(
                     cfg,
                     recent_output=out,
@@ -217,11 +220,12 @@ def main(argv: List[str] | None = None) -> int:
                 for t in chosen.command.split():
                     print(f"- {t}")
             input("\n[ Back ]")
+            os.system("clear")
             continue
 
         # Comment
         if action == "submenu-selected" and sub_idx == 1:
-            note = center_input("Your comment / correction: ").strip()
+            note = center_input("Your comment / correction:").strip()
             ctx = gather_context(
                 cfg,
                 previous_query=query,
@@ -243,7 +247,9 @@ def main(argv: List[str] | None = None) -> int:
                 followup="variants",
             )
             new_sugs = stream_suggestions(model, query, num, ctx, num_ctx, system_prompt, None, cfg.spinner)
-            suggestions = append_new(suggestions, new_sugs)
+            for s in new_sugs:
+                setattr(s, "_is_new", True)
+            suggestions = suggestions[:row_idx] + new_sugs + suggestions[row_idx+1:]
             rows, misslists, new_flags = build_rows(suggestions, show_explain)
             header = line(f"Suggestions (Modified from {shorten(chosen.command)})")
             continue
