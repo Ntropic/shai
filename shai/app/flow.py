@@ -1,7 +1,7 @@
 # shai/app/flow.py
 from __future__ import annotations
 import os, platform, shutil, subprocess, sys, threading, time
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Callable
 
 from ..llm.suggest import request_suggestions, Suggestion
 from ..util.shellparse import extract_commands, which_map
@@ -63,34 +63,37 @@ def is_installer_command(cmd: str) -> bool:
     return bool(bins and bins[0] in INSTALLERS)
 
 # ───── suggestions / ranking ─────
-def fetch_suggestions(model: str, query: str, n: int, ctx: dict, num_ctx: int, spinner=True) -> List[Suggestion]:
+def fetch_suggestions(model: str, query: str, n: int, ctx: dict, num_ctx: int, system_prompt: str, spinner=True) -> List[Suggestion]:
     if spinner:
-        return with_spinner(request_suggestions, "processing", model, query, n, ctx, num_ctx)
-    return request_suggestions(model, query, n, ctx, num_ctx)
+        return with_spinner(request_suggestions, "processing", model, query, n, ctx, num_ctx, system_prompt)
+    return request_suggestions(model, query, n, ctx, num_ctx, system_prompt)
+
+def stream_suggestions(model: str, query: str, n: int, ctx: dict, num_ctx: int,
+                       system_prompt: str, callback: Callable[[Suggestion], None],
+                       spinner: bool = True) -> List[Suggestion]:
+    collected: List[Suggestion] = []
+    for i in range(max(0, n)):
+        batch = fetch_suggestions(model, query, 1, ctx, num_ctx, system_prompt, spinner and i == 0)
+        if not batch:
+            break
+        s = batch[0]
+        setattr(s, "_is_new", True)
+        collected.append(s)
+        try:
+            callback(s)
+        except Exception:
+            pass
+    return collected
 
 def annotate_requires(s: Suggestion) -> Tuple[List[str], int, int]:
     req = s.requires or {}
     missing = [b for b, p in req.items() if not p]
     return missing, len(missing), len(s.command)
 
-def rank_only(items: List[Suggestion]) -> List[Suggestion]:
-    keyed = []
-    for s in items:
-        missing, mc, clen = annotate_requires(s)
-        setattr(s, "_missing_count", mc)
-        setattr(s, "_cmd_len", clen)
-        keyed.append((mc, clen, s))
-    keyed.sort(key=lambda t: (t[0], t[1]))
-    return [s for _,__,s in keyed]
-
-def mark_new(items: List[Suggestion]):
-    for s in items: setattr(s, "_is_new", True)
-
-def prepend_sorted(new_items: List[Suggestion], old_items: List[Suggestion]) -> List[Suggestion]:
-    """Sort only the new items, mark them new, and prepend to old."""
-    new_sorted = rank_only(new_items)
-    mark_new(new_sorted)
-    return new_sorted + old_items
+def append_new(old_items: List[Suggestion], new_items: List[Suggestion]) -> List[Suggestion]:
+    for s in new_items:
+        setattr(s, "_is_new", True)
+    return old_items + new_items
 
 # ───── rows for table ─────
 def build_rows(suggestions: List[Suggestion], show_explain: bool):
