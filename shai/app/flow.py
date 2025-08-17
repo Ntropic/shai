@@ -47,6 +47,12 @@ def gather_context(cfg,
         "shell": os.environ.get("SHELL"),
         "editor": os.environ.get("VISUAL") or os.environ.get("EDITOR"),
         "pm_order": cfg.pm_order,
+        "desktop": os.environ.get("XDG_CURRENT_DESKTOP") or os.environ.get("DESKTOP_SESSION"),
+        "session_type": os.environ.get("XDG_SESSION_TYPE"),
+        "display_server": (
+            "wayland" if os.environ.get("WAYLAND_DISPLAY") else
+            ("x11" if os.environ.get("DISPLAY") else "")
+        ),
         "stdin": _stdin_capture(cfg.use_stdin),
         "num_ctx": cfg.num_ctx,
         "previous_query": previous_query,

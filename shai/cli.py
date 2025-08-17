@@ -14,6 +14,7 @@ from .app.flow import (
 )
 from .llm.suggest import ensure_ollama_running, explain_parts
 
+BASH_HISTFILE = os.path.expanduser(os.environ.get("HISTFILE", "~/.bash_history"))
 HISTFILE = os.path.expanduser("~/.shai_history")
 try:
     readline.read_history_file(HISTFILE)
@@ -50,6 +51,34 @@ def prompt_edit(cmd: str) -> str:
         pass
     return new
 
+def append_shell_history(cmd: str) -> None:
+    try:
+        with open(BASH_HISTFILE, "a", encoding="utf-8") as f:
+            f.write(cmd + "\n")
+    except Exception:
+        pass
+
+def center_input(prompt: str) -> str:
+    os.system("clear")
+    rows, cols = shutil.get_terminal_size((80,20))
+    print("\n" * max(0, rows//2 -1), end="")
+    try:
+        return input(prompt.center(cols))
+    except KeyboardInterrupt:
+        return ""
+
+DANGEROUS_CMDS = {"rm", "dd", "mkfs", "shutdown", "reboot"}
+
+def is_dangerous(cmd: str) -> bool:
+    parts = cmd.strip().split()
+    return bool(parts) and parts[0] in DANGEROUS_CMDS
+
+def confirm_dangerous(cmd: str) -> bool:
+    rows = [("[ Confirm ]",), ("[ Back ]",)]
+    cs = [ColSpec(header="", min_width=20, wrap=False)]
+    action, idx, _ = grid_select(rows, cs, title=line(f"Confirm {shorten(cmd)}"))
+    return action == "row-selected" and idx == 0
+
 def shorten(cmd: str, length: int = 40) -> str:
     return cmd if len(cmd) <= length else cmd[:length-3] + "..."
 
@@ -65,6 +94,7 @@ def main(argv: List[str] | None = None) -> int:
     ap.add_argument("--no-explain", action="store_true", help="hide explanations")
     ap.add_argument("--model")
     ap.add_argument("--ctx", type=int, help="override context window (num_ctx)")
+    ap.add_argument("-u","--unsafe", action="store_true", help="allow dangerous commands without confirm")
     args = ap.parse_args(argv)
 
     cfg = load_settings()
@@ -80,14 +110,19 @@ def main(argv: List[str] | None = None) -> int:
     elif args.explain:                   show_explain = True
     elif args.no_explain:                show_explain = False
     else:                                show_explain = cfg.explain
+    system_prompt = cfg.system_prompt
+    if not show_explain:
+        system_prompt = "\n".join(l for l in system_prompt.splitlines() if "explanation_min" not in l)
 
     query = " ".join(args.query).strip()
     if not query:
-        print("Example: shai -n 3 --ctx 8192 'find big .log files and summarize'"); return 1
+        query = center_input("What do you want to do? ").strip()
+        if not query:
+            return 1
 
     ctx = gather_context(cfg, previous_query=query)
 
-    suggestions = stream_suggestions(model, query, num, ctx, num_ctx, cfg.system_prompt, None, cfg.spinner)
+    suggestions = stream_suggestions(model, query, num, ctx, num_ctx, system_prompt, None, cfg.spinner)
     rows, misslists, new_flags = build_rows(suggestions, show_explain)
     header = line("Suggestions")
 
@@ -137,22 +172,22 @@ def main(argv: List[str] | None = None) -> int:
                         missing = [b for b, p in (chosen.requires or {}).items() if not p]
                         continue
                 cmd_to_run = prompt_edit(chosen.command)
+                if (not args.unsafe) and is_dangerous(cmd_to_run):
+                    if not confirm_dangerous(cmd_to_run):
+                        break
                 print(f"\n\x1b[1mRunning:\x1b[0m {cmd_to_run}\n")
                 rc, out = run_and_capture(cmd_to_run)
+                append_shell_history(cmd_to_run)
                 refresh_requires(chosen)
                 if sub_idx == 0:
                     if is_installer_command(cmd_to_run):
                         ctx = gather_context(cfg, previous_query=query)
-                        suggestions = stream_suggestions(model, query, num, ctx, num_ctx, cfg.system_prompt, None, cfg.spinner)
+                        suggestions = stream_suggestions(model, query, num, ctx, num_ctx, system_prompt, None, cfg.spinner)
                         rows, misslists, new_flags = build_rows(suggestions, show_explain)
                         header = line("Suggestions")
                         break
                     return rc
-                print(line("Next"))
-                try:
-                    follow = input("What do you want to do next? ").strip()
-                except KeyboardInterrupt:
-                    follow = ""
+                follow = center_input("What do you want to do next? ").strip()
                 ctx = gather_context(
                     cfg,
                     recent_output=out,
@@ -160,7 +195,7 @@ def main(argv: List[str] | None = None) -> int:
                     last_executed=cmd_to_run,
                     followup=follow,
                 )
-                new_sugs = stream_suggestions(model, query, num, ctx, num_ctx, cfg.system_prompt, None, cfg.spinner)
+                new_sugs = stream_suggestions(model, query, num, ctx, num_ctx, system_prompt, None, cfg.spinner)
                 suggestions = append_new(suggestions, new_sugs)
                 rows, misslists, new_flags = build_rows(suggestions, show_explain)
                 header = line(f"Suggestions (Follow up to {shorten(cmd_to_run)})")
@@ -169,51 +204,31 @@ def main(argv: List[str] | None = None) -> int:
 
         # Explain
         if action == "submenu-selected" and sub_idx == 3:
-            parts = explain_parts(model, chosen.command, num_ctx)
-            rows_exp: List[List[str]] = []
-            rows_exp.append(("Command", chosen.command))
+            os.system("clear")
+            print(line("Explain"))
+            print(chosen.command + "\n")
             if getattr(chosen, "explanation_min", ""):
-                rows_exp.append(("Summary", chosen.explanation_min))
+                print(chosen.explanation_min + "\n")
+            parts = explain_parts(model, chosen.command, num_ctx) if args.explain else []
             if parts:
                 for p, d in parts:
-                    rows_exp.append((p, d))
-            elif getattr(chosen, "explanation_min", ""):
-                toks = chosen.command.split()
-                if toks:
-                    rows_exp.append((toks[0], ""))
-                    for t in toks[1:]:
-                        rows_exp.append((t, ""))
-                for p in [p.strip() for p in chosen.explanation_min.split(';') if p.strip()]:
-                    rows_exp.append((p, ""))
-            if chosen.requires:
-                for b, pth in (chosen.requires or {}).items():
-                    rows_exp.append((b, ("✓ "+pth) if pth else "✗ missing"))
-            rows_exp.append(("[ Back (Esc) ]", ""))
-            colspecs_exp = [
-                ColSpec(header="Part", min_width=20, wrap=False, ellipsis=True),
-                ColSpec(header="Explanation", min_width=40, wrap=True),
-            ]
-            grid_select(rows_exp, colspecs_exp, title=line("Explain"))
+                    print(f"- {p}: {d}")
+            else:
+                for t in chosen.command.split():
+                    print(f"- {t}")
+            input("\n[ Back ]")
             continue
 
         # Comment
         if action == "submenu-selected" and sub_idx == 1:
-            print(line("Comment"))
-            print("Command: " + chosen.command)
-            if getattr(chosen, "explanation_min", ""):
-                print("Explanation:")
-                print(chosen.explanation_min)
-            try:
-                note = input("\nYour comment / correction: ").strip()
-            except KeyboardInterrupt:
-                note = ""
+            note = center_input("Your comment / correction: ").strip()
             ctx = gather_context(
                 cfg,
                 previous_query=query,
                 last_suggested=chosen.command,
                 followup=note,
             )
-            new_sugs = stream_suggestions(model, query, num, ctx, num_ctx, cfg.system_prompt, None, cfg.spinner)
+            new_sugs = stream_suggestions(model, query, num, ctx, num_ctx, system_prompt, None, cfg.spinner)
             suggestions = append_new(suggestions, new_sugs)
             rows, misslists, new_flags = build_rows(suggestions, show_explain)
             header = line(f"Suggestions (Modified from {shorten(chosen.command)})")
@@ -227,7 +242,7 @@ def main(argv: List[str] | None = None) -> int:
                 last_suggested=chosen.command,
                 followup="variants",
             )
-            new_sugs = stream_suggestions(model, query, num, ctx, num_ctx, cfg.system_prompt, None, cfg.spinner)
+            new_sugs = stream_suggestions(model, query, num, ctx, num_ctx, system_prompt, None, cfg.spinner)
             suggestions = append_new(suggestions, new_sugs)
             rows, misslists, new_flags = build_rows(suggestions, show_explain)
             header = line(f"Suggestions (Modified from {shorten(chosen.command)})")
@@ -249,8 +264,12 @@ def main(argv: List[str] | None = None) -> int:
                         missing = [b for b, p in (chosen.requires or {}).items() if not p]
                         continue
                 cmd_to_run = prompt_edit(chosen.command)
+                if (not args.unsafe) and is_dangerous(cmd_to_run):
+                    if not confirm_dangerous(cmd_to_run):
+                        break
                 print(f"\n\x1b[1mRunning:\x1b[0m {cmd_to_run}\n")
                 rc, _ = run_and_capture(cmd_to_run)
+                append_shell_history(cmd_to_run)
                 refresh_requires(chosen)
                 return rc
 
