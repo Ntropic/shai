@@ -1,10 +1,18 @@
 # shai/pm/install_ui.py
 from __future__ import annotations
-import subprocess
+import subprocess, shutil
 from typing import List, Tuple, Callable, Optional
 
 from ..context.packages import available_pms, search_best_provider, install_command
 from ..ui.table import ColSpec, grid_select
+
+
+def line(text: str) -> str:
+    width = shutil.get_terminal_size((80, 20)).columns
+    pad = max(0, width - len(text) - 2)
+    left = pad // 2
+    right = pad - left
+    return "-" * left + f" {text} " + "-" * right
 
 def _run_stream(cmd: str) -> int:
     """Run install command interactively, streaming output and allowing user input."""
@@ -55,12 +63,12 @@ def offer_installs_for_missing(
             rows.append(("[ Add to exception list ]", f"ignore '{binary}' next time"))
             for pkg, desc in results[:max_pkgs]:
                 rows.append((install_command(pm_used, pkg), desc or ""))
-            title = f" Search: {search_cmd}  [via {pm_used}] "
+            title = line(f"Search: {search_cmd} [via {pm_used}]")
         else:
             rows.append(("[ Back (Esc) ]", "return to suggestions"))
             rows.append(("[ Continue ]", f"run without installing '{binary}'"))
             rows.append(("[ Add to exception list ]", f"ignore '{binary}' next time"))
-            title = f" No results for: {binary} "
+            title = line(f"No results for: {binary}")
 
         colspecs = [
             ColSpec("Install Command", min_width=36, wrap=False, ellipsis=True),

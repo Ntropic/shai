@@ -124,8 +124,6 @@ def make_style_functions(new_flags: List[bool]):
     import curses
     def style_cell(row, col, text):
         if col == 0:  # command
-            if 0 <= row < len(new_flags) and new_flags[row]:
-                return curses.color_pair(6) | curses.A_BOLD
             return curses.color_pair(2)
         if col == 1:  # status
             t = (text or "")
