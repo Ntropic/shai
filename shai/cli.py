@@ -233,7 +233,9 @@ def main(argv: List[str] | None = None) -> int:
                 followup=note,
             )
             new_sugs = stream_suggestions(model, query, num, ctx, num_ctx, system_prompt, None, cfg.spinner)
-            suggestions = append_new(suggestions, new_sugs)
+            for s in new_sugs:
+                setattr(s, "_is_new", True)
+            suggestions = new_sugs
             rows, misslists, new_flags = build_rows(suggestions, show_explain)
             header = line(f"Suggestions (Modified from {shorten(chosen.command)})")
             continue
@@ -249,7 +251,7 @@ def main(argv: List[str] | None = None) -> int:
             new_sugs = stream_suggestions(model, query, num, ctx, num_ctx, system_prompt, None, cfg.spinner)
             for s in new_sugs:
                 setattr(s, "_is_new", True)
-            suggestions = suggestions[:row_idx] + new_sugs + suggestions[row_idx+1:]
+            suggestions = new_sugs
             rows, misslists, new_flags = build_rows(suggestions, show_explain)
             header = line(f"Suggestions (Modified from {shorten(chosen.command)})")
             continue
