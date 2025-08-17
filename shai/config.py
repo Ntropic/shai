@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
-import os
+import os, ast
 
 DEFAULT_PROMPT = (
     "You are a Linux CLI assistant.\n"
@@ -30,8 +30,13 @@ def _parse_tomlish(text: str) -> dict:
         if "=" not in line:
             continue
         k, v = [s.strip() for s in line.split("=", 1)]
-        # booleans / numbers / strings
-        if v.lower() in ("true", "false"):
+        # booleans / numbers / strings / lists
+        if v.startswith("[") and v.endswith("]"):
+            try:
+                val = ast.literal_eval(v)
+            except Exception:
+                val = v
+        elif v.lower() in ("true", "false"):
             val = (v.lower() == "true")
         elif v.startswith(("'", '"')) and v.endswith(("'", '"')):
             val = v[1:-1]
@@ -66,6 +71,10 @@ spinner = true
 history_lines = 30
 use_stdin = true
 cwd_items_max = 40
+extras = [
+  ["Kernel", "uname -r"],
+  ["Window manager", "echo $XDG_CURRENT_DESKTOP"]
+]
 
 [pm]
 order = "pacman,apt,dnf,zypper,brew,flatpak,snap,yay,paru"
@@ -88,6 +97,7 @@ class Settings:
     pm_order: list[str] | None = None
     system_prompt: str = DEFAULT_PROMPT
     ignored_bins: list[str] | None = None
+    extra_context: list[tuple[str, str]] | None = None
 
 def _config_path() -> Path:
     env = os.environ.get("SHAI_CONFIG")
@@ -159,6 +169,14 @@ def load_settings() -> Settings:
     s.use_stdin = bool(cx.get("use_stdin", s.use_stdin))
     try: s.cwd_items_max = int(cx.get("cwd_items_max", s.cwd_items_max))
     except Exception: pass
+    extras = cx.get("extras", [])
+    s.extra_context = []
+    if isinstance(extras, list):
+        for item in extras:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                s.extra_context.append((str(item[0]), str(item[1])))
+    if not s.extra_context:
+        s.extra_context = None
 
     pm = d.get("pm", {})
     order = pm.get("order", "")

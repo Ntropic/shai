@@ -78,6 +78,17 @@ def gather_context(cfg,
         "cwd_contents": cwd_contents,
     }
     ctx["package_managers"] = [pm for pm in cfg.pm_order if shutil.which(pm)]
+    if getattr(cfg, "_extra_cache", None) is None:
+        extra = {}
+        for desc, cmd in (cfg.extra_context or []):
+            try:
+                out = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                extra[desc] = out.stdout.strip()
+            except Exception as e:
+                extra[desc] = f"error: {e}"
+        cfg._extra_cache = extra
+    if getattr(cfg, "_extra_cache", {}):
+        ctx["extra_context"] = cfg._extra_cache
     return ctx
 
 def is_installer_command(cmd: str) -> bool:
