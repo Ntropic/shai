@@ -3,6 +3,19 @@ from dataclasses import dataclass
 from pathlib import Path
 import os
 
+DEFAULT_PROMPT = (
+    "You are a Linux CLI assistant.\n"
+    "Return STRICT JSON:\n\n"
+    "{\"suggestions\":[\n"
+    "  {\"command\":\"...\", \"explanation_min\":\"...\"},\n"
+    "  {\"command\":\"...\", \"explanation_min\":\"...\"}\n"
+    "]}\n\n"
+    "Rules:\n"
+    "- Exactly N suggestions (provided in the user's JSON).\n"
+    "- Single-line commands. Prefer safe flags (--dry-run, -n) where possible.\n"
+    "- Prefer tools detected in context; if uncommon tool is useful, still use it."
+)
+
 # ---------- tiny TOML-ish parser ----------
 def _parse_tomlish(text: str) -> dict:
     data, section = {}, None
@@ -55,6 +68,9 @@ use_stdin = true
 
 [pm]
 order = "pacman,apt,dnf,zypper,brew,flatpak,snap,yay,paru"
+
+[prompt]
+file = "prompt.txt"
 """
 
 @dataclass
@@ -68,6 +84,8 @@ class Settings:
     history_lines: int = 30
     use_stdin: bool = True
     pm_order: list[str] | None = None
+    system_prompt: str = DEFAULT_PROMPT
+    ignored_bins: list[str] | None = None
 
 def _config_path() -> Path:
     env = os.environ.get("SHAI_CONFIG")
@@ -84,7 +102,31 @@ def ensure_default_config() -> Path:
     cfg = base / "config"
     if not cfg.exists() and not (base / "config.toml").exists():
         cfg.write_text(DEFAULT_TEXT, encoding="utf-8")
+    prompt_file = base / "prompt.txt"
+    if not prompt_file.exists():
+        prompt_file.write_text(DEFAULT_PROMPT, encoding="utf-8")
+    ignored = base / "ignored.txt"
+    if not ignored.exists():
+        ignored.write_text("", encoding="utf-8")
     return cfg
+
+def _ignored_path() -> Path:
+    return _xdg_config_home() / "shai" / "ignored.txt"
+
+def add_ignored(bin_name: str) -> None:
+    p = _ignored_path()
+    existing = set()
+    if p.exists():
+        existing.update(b.strip() for b in p.read_text(encoding="utf-8").splitlines() if b.strip())
+    if bin_name not in existing:
+        existing.add(bin_name)
+        p.write_text("\n".join(sorted(existing)) + "\n", encoding="utf-8")
+
+def get_ignored() -> list[str]:
+    p = _ignored_path()
+    if p.exists():
+        return [b.strip() for b in p.read_text(encoding="utf-8").splitlines() if b.strip()]
+    return []
 
 def load_settings() -> Settings:
     ensure_default_config()
@@ -120,5 +162,22 @@ def load_settings() -> Settings:
         s.pm_order = [x.strip() for x in order.split(",") if x.strip()]
     else:
         s.pm_order = ["pacman","apt","dnf","zypper","brew","flatpak","snap","yay","paru"]
+
+    pr = d.get("prompt", {})
+    prompt_file = pr.get("file")
+    if isinstance(prompt_file, str) and prompt_file.strip():
+        pfile = _xdg_config_home() / "shai" / prompt_file
+        if pfile.exists():
+            s.system_prompt = pfile.read_text(encoding="utf-8")
+        else:
+            s.system_prompt = DEFAULT_PROMPT
+    else:
+        s.system_prompt = pr.get("system", DEFAULT_PROMPT)
+
+    ignored_p = _ignored_path()
+    if ignored_p.exists():
+        s.ignored_bins = [b.strip() for b in ignored_p.read_text(encoding="utf-8").splitlines() if b.strip()]
+    else:
+        s.ignored_bins = []
 
     return s

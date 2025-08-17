@@ -3,6 +3,7 @@ from typing import List, Dict, Any
 import json, os
 
 from ..util.shellparse import extract_commands, which_map
+import urllib.request
 
 try:
     import ollama as pyollama
@@ -13,25 +14,41 @@ except Exception:
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
 
+def is_ollama_running(host: str = OLLAMA_HOST) -> bool:
+    try:
+        if HAS_OLLAMA:
+            pyollama.list()
+            return True
+        urllib.request.urlopen(host + "/api/tags", timeout=2)
+        return True
+    except Exception:
+        return False
+
+def ensure_ollama_running():
+    if not is_ollama_running():
+        raise RuntimeError(
+            f"Ollama is not running at {OLLAMA_HOST}.\n"
+            "Start it with 'ollama serve' or see https://ollama.ai for installation instructions."
+        )
+
 @dataclass
 class Suggestion:
     command: str
     explanation_min: str = ""
     requires: Dict[str, str] | None = None
 
-SYSTEM_PROMPT = """You are a Linux CLI assistant.
-Return STRICT JSON:
-
-{"suggestions":[
-  {"command":"...", "explanation_min":"..."},
-  {"command":"...", "explanation_min":"..."}
-]}
-
-Rules:
-- Exactly N suggestions (provided in the user's JSON).
-- Single-line commands. Prefer safe flags (--dry-run, -n) where possible.
-- Prefer tools detected in context; if uncommon tool is useful, still use it.
-"""
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a Linux CLI assistant.\n"
+    "Return STRICT JSON:\n\n"
+    "{\"suggestions\":[\n"
+    "  {\"command\":\"...\", \"explanation_min\":\"...\"},\n"
+    "  {\"command\":\"...\", \"explanation_min\":\"...\"}\n"
+    "]}\n\n"
+    "Rules:\n"
+    "- Exactly N suggestions (provided in the user's JSON).\n"
+    "- Single-line commands. Prefer safe flags (--dry-run, -n) where possible.\n"
+    "- Prefer tools detected in context; if uncommon tool is useful, still use it."
+)
 
 def _chat(model: str, messages: list, num_ctx: int, force_json: bool = True) -> str:
     options = {"num_ctx": int(num_ctx)}
@@ -59,9 +76,10 @@ def _strip_code_fences(s: str) -> str:
             return s[1].split("\n", 1)[-1] if s[1].startswith(("bash","sh")) else s[1]
     return s
 
-def request_suggestions(model: str, query: str, n: int, context: Dict[str,Any], num_ctx: int) -> List[Suggestion]:
+def request_suggestions(model: str, query: str, n: int, context: Dict[str,Any], num_ctx: int,
+                        system_prompt: str = DEFAULT_SYSTEM_PROMPT) -> List[Suggestion]:
     user_payload = {"N": n, "USER_QUERY": query, "CONTEXT": context}
-    messages = [{"role":"system","content": SYSTEM_PROMPT},
+    messages = [{"role":"system","content": system_prompt},
                 {"role":"user","content": json.dumps(user_payload, ensure_ascii=False)}]
     raw = _chat(model, messages, num_ctx, True)
 
@@ -91,3 +109,28 @@ def request_suggestions(model: str, query: str, n: int, context: Dict[str,Any], 
         sug.requires = which_map(extract_commands(l))
         out.append(sug)
     return out
+
+
+def explain_parts(model: str, command: str, num_ctx: int) -> List[tuple[str, str]]:
+    """Break a shell command into components and explain each."""
+    prompt = (
+        "You are a Linux CLI assistant.\n"
+        "Given a shell command, break it into the executable and each flag or arg.\n"
+        "Return STRICT JSON: {\"parts\":[{\"text\":\"ls\",\"desc\":\"list directory contents\"}]}"
+    )
+    messages = [
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": command},
+    ]
+    raw = _chat(model, messages, num_ctx, True)
+    try:
+        data = json.loads(raw)
+        parts = []
+        for p in data.get("parts", []):
+            text = (p or {}).get("text", "").strip()
+            if not text:
+                continue
+            parts.append((text, (p or {}).get("desc", "").strip()))
+        return parts
+    except Exception:
+        return []

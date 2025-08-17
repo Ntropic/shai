@@ -1,18 +1,33 @@
 # shai/cli.py
 from __future__ import annotations
 import argparse
-from typing import List
+from typing import List, Any
 
-from .config import load_settings
+import threading
+from .config import load_settings, add_ignored, get_ignored
 from .ui.table import ColSpec, grid_select
 from .pm.install_ui import offer_installs_for_missing
 from .app.flow import (
-    fetch_suggestions, gather_context, build_rows, make_style_functions,
-    prepend_sorted, is_installer_command, run_and_capture, refresh_requires, rank_only
+    gather_context, build_rows, make_style_functions,
+    is_installer_command, run_and_capture, refresh_requires,
+    stream_suggestions,
 )
+from .llm.suggest import ensure_ollama_running, explain_parts
+
+
+def line(text: str, width: int = 60) -> None:
+    """Print a centered dashed line with text."""
+    pad = max(0, width - len(text) - 2)
+    left = pad // 2
+    right = pad - left
+    print("-" * left + f" {text} " + "-" * right)
 
 def main(argv: List[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="shai", description="Natural language → CLI suggestions via Ollama.")
+    ap = argparse.ArgumentParser(
+        prog="shai",
+        description="Natural language → CLI suggestions via Ollama.",
+        epilog="Ensure the Ollama service is running (start with 'ollama serve').",
+    )
     ap.add_argument("query", nargs="*", help="what you want to do (natural language)")
     ap.add_argument("-n","--num", type=int, help="number of suggestions")
     ap.add_argument("-e","--explain", action="store_true", help="show explanations")
@@ -22,6 +37,11 @@ def main(argv: List[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     cfg = load_settings()
+    try:
+        ensure_ollama_running()
+    except RuntimeError as e:
+        print(e)
+        return 1
     model   = args.model or cfg.model
     num     = cfg.n_suggestions if args.num is None else max(1, args.num)
     num_ctx = cfg.num_ctx if args.ctx is None else max(512, int(args.ctx))
@@ -34,25 +54,32 @@ def main(argv: List[str] | None = None) -> int:
     if not query:
         print("Example: shai -n 3 --ctx 8192 'find big .log files and summarize'"); return 1
 
-    # First batch (rank ONLY the page we got)
     ctx = gather_context(cfg, previous_query=query)
-    suggestions = fetch_suggestions(model, query, num, ctx, num_ctx, spinner=True)
-    if not suggestions:
-        print("No suggestions returned."); return 2
-    suggestions = rank_only(suggestions)
+
+    suggestions: List[Any] = []
+    if show_explain:
+        rows: List[Any] = [("[ Skip ]", "", "Exit without choosing")]
+    else:
+        rows: List[Any] = [("[ Skip ]", "")]
+    misslists: List[List[str]] = [[]]
+    new_flags: List[bool] = [False]
+
+    def start_stream(n: int, context: dict):
+        def _cb(s):
+            suggestions.append(s)
+            r, m, f = build_rows([s], show_explain)
+            rows.insert(-1, r[0]); misslists.insert(-1, m[0]); new_flags.insert(-1, f[0])
+        t = threading.Thread(
+            target=stream_suggestions,
+            args=(model, query, n, context, num_ctx, cfg.system_prompt, _cb, False),
+            daemon=True,
+        )
+        t.start()
+        return t
+
+    stream_thread = start_stream(num, ctx)
 
     while True:
-        rows, misslists, new_flags = build_rows(suggestions, show_explain)
-
-        # Append SKIP row at the bottom
-        if show_explain:
-            rows.append(("[ Skip ]", "", "Exit without choosing"))
-        else:
-            rows.append(("[ Skip ]", ""))
-        misslists.append([])  # no missing tools for skip
-        new_flags.append(False)
-
-        # Wider Command, narrow Status, small Explanation
         if show_explain:
             colspecs = [
                 ColSpec(header="Command",     min_width=56, wrap=False, ellipsis=True),
@@ -66,103 +93,124 @@ def main(argv: List[str] | None = None) -> int:
             ]
         style_cell, style_line = make_style_functions(new_flags)
 
-        # 2x2 submenu
-        def menu_for_row(i: int): return ["Execute", "Comment", "Exec → Continue", "Explain"]
+        def menu_for_row(i: int):
+            return ["Execute", "Comment", "Exec → Continue", "Explain", "Variations"]
 
         action, row_idx, sub_idx = grid_select(
             rows, colspecs,
             row_menu_provider=menu_for_row,
-            submenu_cols=2,  # 2x2
+            submenu_cols=cfg.submenu_cols,
             title=" Suggestions ",
             style_fn=style_cell,
             line_style_fn=style_line,
         )
+
+        if stream_thread.is_alive():
+            stream_thread.join()
+
         if action in ("quit",) or row_idx is None:
             print("\x1b[2mDone.\x1b[0m"); return 0
 
-        # If the user selected the SKIP row (last row), exit cleanly
-        if row_idx == len(rows) - 1:
-            print("\x1b[2mSkipped.\x1b[0m")
-            return 0
+        if row_idx == len(suggestions):
+            print("\x1b[2mSkipped.\x1b[0m"); return 0
 
         chosen = suggestions[row_idx]
         missing = misslists[row_idx]
 
         # Execute / Exec → Continue
         if action == "submenu-selected" and sub_idx in (0, 2):
+            missing = [b for b in missing if b not in (cfg.ignored_bins or [])]
             if missing:
-                # Open installer UI; if anything was installed, refresh requires and go back to menu
-                installed_any = offer_installs_for_missing(missing, cfg.pm_order, cfg.n_suggestions)
+                installed_any = offer_installs_for_missing(missing, cfg.pm_order, cfg.n_suggestions, add_ignored)
+                cfg.ignored_bins = get_ignored()
                 if installed_any:
                     refresh_requires(chosen)
-                # either way, back to suggestions table
                 continue
 
             if sub_idx == 0:
-                # Execute: stream output; if installer, come back and prepend a NEW page
                 print("\x1b[1mRunning:\x1b[0m " + chosen.command + "\n")
                 rc, _ = run_and_capture(chosen.command)
                 if is_installer_command(chosen.command):
                     refresh_requires(chosen)
                     ctx = gather_context(cfg, previous_query=query)
-                    new_page = fetch_suggestions(model, query, len(suggestions), ctx, num_ctx, spinner=True)
-                    suggestions = prepend_sorted(new_page, suggestions)
+                    new_flags[:] = [False]*len(new_flags)
+                    stream_thread = start_stream(len(suggestions), ctx)
                     continue
                 return rc
 
-            # Exec → Continue: stream output, then REPLACE with N brand-new suggestions
             print("\x1b[1mRunning:\x1b[0m " + chosen.command + "\n")
             rc, out = run_and_capture(chosen.command)
             refresh_requires(chosen)
+            line("Next")
             try:
-                follow = input("\nWhat do you want to do next? ").strip()
+                follow = input("What do you want to do next? ").strip()
             except KeyboardInterrupt:
                 follow = ""
-            ctx = gather_context(cfg,
-                                 recent_output=out,
-                                 previous_query=query,
-                                 last_executed=chosen.command,
-                                 followup=follow)
-            new_page = fetch_suggestions(model, query, len(suggestions), ctx, num_ctx, spinner=True)
-            new_page = rank_only(new_page)
-            # Replace (old ones removed), mark as NEW so they’re bolded
-            for s in new_page: setattr(s, "_is_new", True)
-            suggestions = new_page
+            ctx = gather_context(
+                cfg,
+                recent_output=out,
+                previous_query=query,
+                last_executed=chosen.command,
+                followup=follow,
+            )
+            new_flags[:] = [False]*len(new_flags)
+            stream_thread = start_stream(len(suggestions), ctx)
             continue
 
         # Explain
         if action == "submenu-selected" and sub_idx == 3:
-            print("\n\x1b[1mCommand:\x1b[0m " + chosen.command)
-            print("\x1b[1mExplanation:\x1b[0m")
-            if getattr(chosen, "explanation_min", ""):
-                print(chosen.explanation_min)
+            line("Explain")
+            print("Command: " + chosen.command)
+            parts = explain_parts(model, chosen.command, num_ctx)
+            if parts:
+                head, desc = parts[0]
+                print(f"- {head}: {desc}")
+                for p, d in parts[1:]:
+                    print(f"  - {p}: {d}")
+            elif getattr(chosen, "explanation_min", ""):
+                for p in [p.strip() for p in chosen.explanation_min.split(';') if p.strip()]:
+                    print("- " + p)
             else:
                 print("\x1b[2m(no explanation provided by the model)\x1b[0m")
-            print("\x1b[1mTools:\x1b[0m")
-            for b,p in (chosen.requires or {}).items():
+            line("Tools")
+            for b, p in (chosen.requires or {}).items():
                 print(f"  {b:10} {'✓ '+p if p else '✗ missing'}")
             input("\x1b[2m\nPress Enter to return…\x1b[0m")
             continue
 
-        # Comment → show command & explanation, accept note, PREPEND N new items (sorted)
+        # Comment
         if action == "submenu-selected" and sub_idx == 1:
-            print("\n\x1b[1mCommand:\x1b[0m " + chosen.command)
+            line("Comment")
+            print("Command: " + chosen.command)
             if getattr(chosen, "explanation_min", ""):
-                print("\x1b[1mExplanation:\x1b[0m")
+                print("Explanation:")
                 print(chosen.explanation_min)
             try:
                 note = input("\nYour comment / correction: ").strip()
             except KeyboardInterrupt:
                 note = ""
-            ctx = gather_context(cfg,
-                                 previous_query=query,
-                                 last_suggested=chosen.command,
-                                 followup=note)
-            new_page = fetch_suggestions(model, query, len(suggestions), ctx, num_ctx, spinner=True)
-            suggestions = prepend_sorted(new_page, suggestions)
+            ctx = gather_context(
+                cfg,
+                previous_query=query,
+                last_suggested=chosen.command,
+                followup=note,
+            )
+            new_flags[:] = [False]*len(new_flags)
+            stream_thread = start_stream(len(suggestions), ctx)
             continue
 
-        # fallback
+        # Variations
+        if action == "submenu-selected" and sub_idx == 4:
+            ctx = gather_context(
+                cfg,
+                previous_query=query,
+                last_suggested=chosen.command,
+                followup="variants",
+            )
+            new_flags[:] = [False]*len(new_flags)
+            stream_thread = start_stream(len(suggestions), ctx)
+            continue
+
         if action == "row-selected":
             print("\x1b[1mRunning:\x1b[0m " + chosen.command + "\n")
             rc, _ = run_and_capture(chosen.command)

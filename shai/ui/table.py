@@ -212,14 +212,15 @@ def grid_select(
     line_style_fn: Optional[Callable[[int,int,int,str], int]] = None,
 ) -> Tuple[str, Optional[int], Optional[int]]:
     def inner(stdscr):
-        curses.curs_set(0); curses.use_default_colors()
-        # color pairs: 1=highlight bg, 2=cyan, 3=green, 4=red, 5=dim (fallback)
+        curses.curs_set(0); curses.use_default_colors(); stdscr.timeout(100)
+        # color pairs: 1=highlight bg, 2=cyan, 3=green, 4=red, 5=dim (fallback), 6=magenta
         try:
             curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_CYAN)
             curses.init_pair(2, curses.COLOR_CYAN, -1)
             curses.init_pair(3, curses.COLOR_GREEN, -1)
             curses.init_pair(4, curses.COLOR_RED, -1)
             curses.init_pair(5, curses.COLOR_BLACK, -1)
+            curses.init_pair(6, curses.COLOR_MAGENTA, -1)
         except Exception:
             pass
         HIL = curses.color_pair(1) | curses.A_BOLD
@@ -266,6 +267,8 @@ def grid_select(
             stdscr.refresh()
 
             ch = stdscr.getch()
+            if ch == -1:
+                continue
             if mode == "rows":
                 if ch in (curses.KEY_UP, ord('k')):   sel_row = max(0, sel_row-1)
                 elif ch in (curses.KEY_DOWN, ord('j')): sel_row = min(len(rows)-1, sel_row+1)

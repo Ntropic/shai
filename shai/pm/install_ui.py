@@ -1,7 +1,7 @@
 # shai/pm/install_ui.py
 from __future__ import annotations
 import subprocess
-from typing import List, Tuple
+from typing import List, Tuple, Callable, Optional
 
 from ..context.packages import available_pms, search_best_provider, install_command
 from ..ui.table import ColSpec, grid_select
@@ -21,7 +21,12 @@ def _run_stream(cmd: str) -> int:
         return proc.returncode
     return proc.wait()
 
-def offer_installs_for_missing(missing_bins: List[str], pm_order: List[str], max_pkgs: int = 10) -> bool:
+def offer_installs_for_missing(
+    missing_bins: List[str],
+    pm_order: List[str],
+    max_pkgs: int = 10,
+    add_ignored: Optional[Callable[[str], None]] = None,
+) -> bool:
     """
     For each missing binary, search the configured package managers in order.
     Show skipped PMs (with 'no results') before showing the first that had hits.
@@ -53,14 +58,14 @@ def offer_installs_for_missing(missing_bins: List[str], pm_order: List[str], max
 
         rows: List[Tuple[str, str]] = []
         if results:
-            # Skip row always first
             rows.append(("[ Skip ]", f"skip installing '{binary}' and continue"))
+            rows.append(("[ Ignore ]", f"do not prompt for '{binary}' again"))
             for pkg, desc in results[:max_pkgs]:
                 rows.append((install_command(pm_used, pkg), desc or ""))
             title = f" Search: {search_cmd}  [via {pm_used}] "
         else:
-            # No hits at all
             rows.append(("[ Skip ]", f"no results for '{binary}' → continue anyway"))
+            rows.append(("[ Ignore ]", f"do not prompt for '{binary}' again"))
             title = f" No results for: {binary} "
 
         colspecs = [
@@ -81,7 +86,12 @@ def offer_installs_for_missing(missing_bins: List[str], pm_order: List[str], max
 
         # Always execute suggestion if Skip chosen
         if r == 0:
-            continue  # skip installing, but don't block execution
+            continue  # skip installing
+        if r == 1:
+            if add_ignored:
+                add_ignored(binary)
+                print(f"\x1b[2mIgnored '{binary}' for future suggestions.\x1b[0m")
+            continue
 
         if action == "submenu-selected":
             if s == 0:  # Run
