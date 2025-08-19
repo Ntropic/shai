@@ -153,10 +153,14 @@ def build_rows(suggestions: List[Suggestion], show_explain: bool):
     return rows, misslists, new_flags
 
 # ───── per-cell styling hooks ─────
-def make_style_functions(new_flags: List[bool]):
+def make_style_functions(new_flags: List[bool], risk_flags: List[str]):
     import curses
     def style_cell(row, col, text):
         if col == 0:  # command
+            if risk_flags[row] == "danger":
+                return curses.color_pair(4) | curses.A_BOLD
+            if risk_flags[row] == "caution":
+                return curses.color_pair(7) | curses.A_BOLD
             return curses.color_pair(2)
         if col == 1:  # status
             t = (text or "")

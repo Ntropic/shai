@@ -111,13 +111,8 @@ def request_suggestions(model: str, query: str, n: int, context: Dict[str,Any], 
     return out
 
 
-def explain_parts(model: str, command: str, num_ctx: int) -> List[tuple[str, str]]:
+def explain_parts(model: str, command: str, num_ctx: int, prompt: str) -> List[tuple[str, str]]:
     """Break a shell command into components and explain each."""
-    prompt = (
-        "You are a Linux CLI assistant.\n"
-        "Given a shell command, break it into the executable and each flag or arg.\n"
-        "Return STRICT JSON: {\"parts\":[{\"text\":\"ls\",\"desc\":\"list directory contents\"}]}"
-    )
     messages = [
         {"role": "system", "content": prompt},
         {"role": "user", "content": command},

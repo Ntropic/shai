@@ -1,6 +1,6 @@
 # shai/cli.py
 from __future__ import annotations
-import argparse, os, shutil
+import argparse, os, shutil, re
 from typing import List
 
 import readline
@@ -13,6 +13,7 @@ from .app.flow import (
     stream_suggestions, append_new,
 )
 from .llm.suggest import ensure_ollama_running, explain_parts
+from .util.ansi import visible_len, crop_visible, RED, YELLOW
 
 BASH_HISTFILE = os.path.expanduser(os.environ.get("HISTFILE", "~/.bash_history"))
 HISTFILE = os.path.expanduser("~/.shai_history")
@@ -25,10 +26,17 @@ except Exception:
 def line(text: str) -> str:
     """Return a centered dashed line with text spanning the terminal width."""
     width = shutil.get_terminal_size((80, 20)).columns
-    pad = max(0, width - len(text) - 2)
+    pad = max(0, width - visible_len(text) - 2)
     left = pad // 2
     right = pad - left
     return "-" * left + f" {text} " + "-" * right
+
+def highlight_risks(text: str, caution: list[str], danger: list[str]) -> str:
+    for cmd in danger:
+        text = re.sub(rf"\b{re.escape(cmd)}\b", RED(cmd), text)
+    for cmd in caution:
+        text = re.sub(rf"\b{re.escape(cmd)}\b", YELLOW(cmd), text)
+    return text
 
 def prompt_edit(cmd: str) -> str:
     """Pre-fill input with command and allow user to edit before execution."""
@@ -74,20 +82,25 @@ def ask_followup() -> str:
     """Centered prompt for follow-up commands."""
     return center_input("What do you want to do next?").strip()
 
-DANGEROUS_CMDS = {"rm", "dd", "mkfs", "shutdown", "reboot"}
-
-def is_dangerous(cmd: str) -> bool:
+def classify_risk(cmd: str, caution: list[str], danger: list[str]) -> str:
     parts = cmd.strip().split()
-    return bool(parts) and parts[0] in DANGEROUS_CMDS
+    if not parts:
+        return "none"
+    if parts[0] in danger:
+        return "danger"
+    if parts[0] in caution:
+        return "caution"
+    return "none"
 
-def confirm_dangerous(cmd: str) -> bool:
-    rows = [("[ Confirm ]",), ("[ Back ]",)]
-    cs = [ColSpec(header="", min_width=20, wrap=False)]
-    action, idx, _ = grid_select(rows, cs, title=line(f"Confirm {shorten(cmd)}"))
-    return action == "row-selected" and idx == 0
+def confirm_risk(cmd: str, risk: str, caution: list[str], danger: list[str]) -> bool:
+    title = line(f"Confirm {shorten(cmd)}")
+    rows = [("[ Back ]",), ("[ Proceed ]",)]
+    cs = [ColSpec(header="", min_width=30, wrap=False)]
+    action, idx, _ = grid_select(rows, cs, title=title)
+    return action == "row-selected" and idx == 1
 
 def shorten(cmd: str, length: int = 40) -> str:
-    return cmd if len(cmd) <= length else cmd[:length-3] + "..."
+    return cmd if visible_len(cmd) <= length else crop_visible(cmd, length-3) + "..."
 
 def main(argv: List[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
@@ -110,6 +123,7 @@ def main(argv: List[str] | None = None) -> int:
     except RuntimeError as e:
         print(e)
         return 1
+    hl = lambda s: highlight_risks(s, cfg.caution_cmds or [], cfg.dangerous_cmds or [])
     model   = args.model or cfg.model
     num     = cfg.n_suggestions if args.num is None else max(1, args.num)
     num_ctx = cfg.num_ctx if args.ctx is None else max(512, int(args.ctx))
@@ -131,6 +145,7 @@ def main(argv: List[str] | None = None) -> int:
 
     suggestions = stream_suggestions(model, query, num, ctx, num_ctx, system_prompt, None, cfg.spinner)
     rows, misslists, new_flags = build_rows(suggestions, show_explain)
+    risk_flags = [classify_risk(s.command, cfg.caution_cmds or [], cfg.dangerous_cmds or []) for s in suggestions]
     header = line("Suggestions")
 
     while True:
@@ -145,7 +160,7 @@ def main(argv: List[str] | None = None) -> int:
                 ColSpec(header="Command",     min_width=56, wrap=False, ellipsis=True),
                 ColSpec(header="Status",      min_width=16, wrap=True),
             ]
-        style_cell, style_line = make_style_functions(new_flags)
+        style_cell, style_line = make_style_functions(new_flags, risk_flags)
 
         def menu_for_row(i: int):
             return ["Execute", "Comment", "Exec → Continue", "Explain", "Variations", "Back"]
@@ -179,10 +194,10 @@ def main(argv: List[str] | None = None) -> int:
                         missing = [b for b, p in (chosen.requires or {}).items() if not p]
                         continue
                 cmd_to_run = prompt_edit(chosen.command)
-                if (not args.unsafe) and is_dangerous(cmd_to_run):
-                    if not confirm_dangerous(cmd_to_run):
+                risk = classify_risk(cmd_to_run, cfg.caution_cmds or [], cfg.dangerous_cmds or [])
+                if (not args.unsafe) and risk != "none":
+                    if not confirm_risk(cmd_to_run, risk, cfg.caution_cmds or [], cfg.dangerous_cmds or []):
                         break
-                print(f"\n\x1b[1mRunning:\x1b[0m {cmd_to_run}\n")
                 rc, out = run_and_capture(cmd_to_run)
                 append_shell_history(cmd_to_run)
                 refresh_requires(chosen)
@@ -191,6 +206,7 @@ def main(argv: List[str] | None = None) -> int:
                         ctx = gather_context(cfg, previous_query=query)
                         suggestions = stream_suggestions(model, query, num, ctx, num_ctx, system_prompt, None, cfg.spinner)
                         rows, misslists, new_flags = build_rows(suggestions, show_explain)
+                        risk_flags = [classify_risk(s.command, cfg.caution_cmds or [], cfg.dangerous_cmds or []) for s in suggestions]
                         header = line("Suggestions")
                         break
                     return rc
@@ -205,6 +221,7 @@ def main(argv: List[str] | None = None) -> int:
                 new_sugs = stream_suggestions(model, query, num, ctx, num_ctx, system_prompt, None, cfg.spinner)
                 suggestions = append_new(suggestions, new_sugs)
                 rows, misslists, new_flags = build_rows(suggestions, show_explain)
+                risk_flags = [classify_risk(s.command, cfg.caution_cmds or [], cfg.dangerous_cmds or []) for s in suggestions]
                 header = line(f"Suggestions (Follow up to {shorten(cmd_to_run)})")
                 break
             continue
@@ -213,18 +230,15 @@ def main(argv: List[str] | None = None) -> int:
         if action == "submenu-selected" and sub_idx == 3:
             os.system("clear")
             print(line("Explain"))
-            print(chosen.command + "\n")
+            print(hl(chosen.command) + "\n")
             if getattr(chosen, "explanation_min", ""):
-                print(chosen.explanation_min + "\n")
-            parts = explain_parts(model, chosen.command, num_ctx) if args.explain else []
-            if parts:
-                for p, d in parts:
-                    print(f"- {p}: {d}")
-            else:
-                for t in chosen.command.split():
-                    print(f"- {t}")
+                print(hl(chosen.explanation_min) + "\n")
+            parts = explain_parts(model, chosen.command, num_ctx, cfg.explain_prompt) if args.explain else []
+            for t, d in parts:
+                print(f"- {hl(t)}: {hl(d)}")
             input("\n[ Back ]")
             os.system("clear")
+            header = line("Suggestions")
             continue
 
         # Comment
@@ -241,6 +255,7 @@ def main(argv: List[str] | None = None) -> int:
                 setattr(s, "_is_new", True)
             suggestions = new_sugs
             rows, misslists, new_flags = build_rows(suggestions, show_explain)
+            risk_flags = [classify_risk(s.command, cfg.caution_cmds or [], cfg.dangerous_cmds or []) for s in suggestions]
             header = line(f"Suggestions (Modified from {shorten(chosen.command)})")
             continue
 
@@ -257,6 +272,7 @@ def main(argv: List[str] | None = None) -> int:
                 setattr(s, "_is_new", True)
             suggestions = new_sugs
             rows, misslists, new_flags = build_rows(suggestions, show_explain)
+            risk_flags = [classify_risk(s.command, cfg.caution_cmds or [], cfg.dangerous_cmds or []) for s in suggestions]
             header = line(f"Suggestions (Modified from {shorten(chosen.command)})")
             continue
 
@@ -276,10 +292,10 @@ def main(argv: List[str] | None = None) -> int:
                         missing = [b for b, p in (chosen.requires or {}).items() if not p]
                         continue
                 cmd_to_run = prompt_edit(chosen.command)
-                if (not args.unsafe) and is_dangerous(cmd_to_run):
-                    if not confirm_dangerous(cmd_to_run):
+                risk = classify_risk(cmd_to_run, cfg.caution_cmds or [], cfg.dangerous_cmds or [])
+                if (not args.unsafe) and risk != "none":
+                    if not confirm_risk(cmd_to_run, risk, cfg.caution_cmds or [], cfg.dangerous_cmds or []):
                         break
-                print(f"\n\x1b[1mRunning:\x1b[0m {cmd_to_run}\n")
                 rc, _ = run_and_capture(cmd_to_run)
                 append_shell_history(cmd_to_run)
                 refresh_requires(chosen)

@@ -16,6 +16,12 @@ DEFAULT_PROMPT = (
     "- Prefer tools detected in context; if uncommon tool is useful, still use it."
 )
 
+DEFAULT_EXPLAIN_PROMPT = (
+    "You are a Linux CLI assistant.\n"
+    "Given a shell command, break it into the executable and each flag or arg.\n"
+    "Return STRICT JSON: {\"parts\":[{\"text\":\"ls\",\"desc\":\"list directory contents\"}]}"
+)
+
 # ---------- tiny TOML-ish parser ----------
 def _parse_tomlish(text: str) -> dict:
     data, section = {}, None
@@ -79,8 +85,14 @@ extras = [
 [pm]
 order = "pacman,apt,dnf,zypper,brew,flatpak,snap,yay,paru"
 
-[prompt]
-file = "prompt.txt"
+[files]
+prompt = "prompt.txt"
+ignored = "ignored.txt"
+explain = "explain_detailed.txt"
+
+[risk]
+dangerous = ["rm","dd","mkfs","shutdown","reboot"]
+caution   = ["sudo","chmod","chown"]
 """
 
 @dataclass
@@ -97,6 +109,9 @@ class Settings:
     pm_order: list[str] | None = None
     system_prompt: str = DEFAULT_PROMPT
     ignored_bins: list[str] | None = None
+    dangerous_cmds: list[str] | None = None
+    caution_cmds: list[str] | None = None
+    explain_prompt: str = DEFAULT_EXPLAIN_PROMPT
     extra_context: list[tuple[str, str]] | None = None
 
 def _config_path() -> Path:
@@ -119,10 +134,19 @@ def ensure_default_config() -> Path:
         prompt_file.write_text(DEFAULT_PROMPT, encoding="utf-8")
     ignored = base / "ignored.txt"
     if not ignored.exists():
-        ignored.write_text("", encoding="utf-8")
+        ignored.write_text("\n".join([
+            "bash","sh","ls","cat","echo","cd","pwd","touch",
+            "mkdir","grep","find","cp","mv","rm","chmod","chown"
+        ]) + "\n", encoding="utf-8")
+    explain = base / "explain_detailed.txt"
+    if not explain.exists():
+        explain.write_text(DEFAULT_EXPLAIN_PROMPT, encoding="utf-8")
     return cfg
 
 def _ignored_path() -> Path:
+    env = os.environ.get("SHAI_IGNORED_FILE")
+    if env:
+        return Path(env)
     return _xdg_config_home() / "shai" / "ignored.txt"
 
 def add_ignored(bin_name: str) -> None:
@@ -185,21 +209,25 @@ def load_settings() -> Settings:
     else:
         s.pm_order = ["pacman","apt","dnf","zypper","brew","flatpak","snap","yay","paru"]
 
-    pr = d.get("prompt", {})
-    prompt_file = pr.get("file")
-    if isinstance(prompt_file, str) and prompt_file.strip():
-        pfile = _xdg_config_home() / "shai" / prompt_file
-        if pfile.exists():
-            s.system_prompt = pfile.read_text(encoding="utf-8")
-        else:
-            s.system_prompt = DEFAULT_PROMPT
-    else:
-        s.system_prompt = pr.get("system", DEFAULT_PROMPT)
+    files = d.get("files", {})
+    prompt_fname = str(files.get("prompt", "prompt.txt"))
+    ignored_fname = str(files.get("ignored", "ignored.txt"))
+    explain_fname = str(files.get("explain", "explain_detailed.txt"))
+    base = _xdg_config_home() / "shai"
+    pfile = base / prompt_fname
+    s.system_prompt = pfile.read_text(encoding="utf-8") if pfile.exists() else DEFAULT_PROMPT
+    ignored_path = base / ignored_fname
+    os.environ["SHAI_IGNORED_FILE"] = str(ignored_path)
+    s.ignored_bins = [b.strip() for b in ignored_path.read_text(encoding="utf-8").splitlines() if b.strip()] if ignored_path.exists() else []
+    efile = base / explain_fname
+    s.explain_prompt = efile.read_text(encoding="utf-8") if efile.exists() else DEFAULT_EXPLAIN_PROMPT
 
-    ignored_p = _ignored_path()
-    if ignored_p.exists():
-        s.ignored_bins = [b.strip() for b in ignored_p.read_text(encoding="utf-8").splitlines() if b.strip()]
-    else:
-        s.ignored_bins = []
+    rk = d.get("risk", {})
+    dan = rk.get("dangerous", [])
+    cau = rk.get("caution", [])
+    if isinstance(dan, list): s.dangerous_cmds = [str(x) for x in dan]
+    else: s.dangerous_cmds = ["rm","dd","mkfs","shutdown","reboot"]
+    if isinstance(cau, list): s.caution_cmds = [str(x) for x in cau]
+    else: s.caution_cmds = ["sudo","chmod","chown"]
 
     return s

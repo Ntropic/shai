@@ -213,6 +213,10 @@ def grid_select(
 ) -> Tuple[str, Optional[int], Optional[int]]:
     def inner(stdscr):
         curses.curs_set(0); curses.use_default_colors(); stdscr.timeout(100)
+        try:
+            curses.putp(curses.tigetstr("rmcup") or "")
+        except Exception:
+            pass
         # color pairs: 1=highlight bg, 2=cyan, 3=green, 4=red, 5=dim (fallback), 6=magenta
         try:
             curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_CYAN)
@@ -221,6 +225,7 @@ def grid_select(
             curses.init_pair(4, curses.COLOR_RED, -1)
             curses.init_pair(5, curses.COLOR_BLACK, -1)
             curses.init_pair(6, curses.COLOR_MAGENTA, -1)
+            curses.init_pair(7, curses.COLOR_YELLOW, -1)
         except Exception:
             pass
         HIL = curses.color_pair(1) | curses.A_BOLD

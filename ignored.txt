@@ -1,0 +1,16 @@
+bash
+sh
+ls
+cat
+echo
+cd
+pwd
+touch
+mkdir
+grep
+find
+cp
+mv
+rm
+chmod
+chown
